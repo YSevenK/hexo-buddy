@@ -113,68 +113,35 @@ export class HexoSidebarProvider implements vscode.WebviewViewProvider {
         const config = this.configService.getConfig();
         const currentTheme = this.themeService.getCurrentTheme();
         const themes = await this.themeService.getInstalledThemes(); // 获取主题列表
-
-        this._view.webview.html = `
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <style>
-                    /* 基础样式 */
-                    body { padding: 0; color: var(--vscode-foreground); font-size: 12px; }
-                    .nav-bar { display: flex; background: var(--vscode-sideBar-background); border-bottom: 1px solid var(--vscode-panel-border); sticky; top: 0; }
-                    .nav-item { flex: 1; padding: 8px 4px; text-align: center; cursor: pointer; opacity: 0.6; font-size: 10px; }
-                    .nav-item.active { opacity: 1; border-bottom: 2px solid var(--vscode-button-background); }
-                    .content { padding: 10px; }
-                    .card { background: var(--vscode-welcomePage-tileBackground); padding: 10px; border-radius: 4px; margin-bottom: 10px; }
-                    input { width: 100%; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px; margin: 4px 0; }
-                    button { width: 100%; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px; cursor: pointer; }
-                </style>
-            </head>
-            <body>
-                <div class="nav-bar">
-                    <div class="nav-item ${this.currentTab === 'dashboard' ? 'active' : ''}" onclick="tab('dashboard')">📊</div>
-                    <div class="nav-item ${this.currentTab === 'posts' ? 'active' : ''}" onclick="tab('posts')">📝</div>
-                    <div class="nav-item ${this.currentTab === 'themes' ? 'active' : ''}" onclick="tab('themes')">🎨</div>
-                    <div class="nav-item ${this.currentTab === 'config' ? 'active' : ''}" onclick="tab('config')">⚙️</div>
-                </div>
-                <div class="content">
-                    ${this.renderTabContent(posts, config, currentTheme, themes)}
-                </div>
-                <script>
-                    const vscode = acquireVsCodeApi();
-                    function tab(name) { vscode.postMessage({ type: 'switchTab', tab: name }); }
-                    function send(type, arg) {
-                        const payload = { type };
-                        if (arg !== undefined) {
-                            if (type === 'deletePost' || type === 'openPost') payload.path = arg;
-                            else if (type === 'switchTheme') payload.theme = arg;
-                            else if (type === 'switchTab') payload.tab = arg;
-                            else payload.data = arg;
-                        }
-                        vscode.postMessage(payload);
-                    }
-                    function save() {
-                        const data = {
-                            title: document.getElementById('cfg-title')?.value,
-                            author: document.getElementById('cfg-author')?.value,
-                            url: document.getElementById('cfg-url')?.value
-                        };
-                        vscode.postMessage({ type: 'saveConfig', data });
-                    }
-                    window.addEventListener('message', event => {
-                        const msg = event.data;
-                        if (!msg) return;
-                        if (msg.type === 'deployStatus') {
-                            const el = document.getElementById('deploy-status');
-                            if (el) el.textContent = msg.status;
-                            const logs = document.getElementById('deploy-logs');
-                            if (logs) logs.innerHTML += '<div>' + msg.status + '</div>';
-                        }
-                    });
-                </script>
-            </body>
-            </html>
-        `;
+        // 从独立 HTML 模板加载并注入动态部分（主要是 tab 内容）
+        try {
+            const path = require('path');
+            const candidates = [
+                path.join(__dirname, 'dashboard.html'),
+                path.join(this._extensionUri.fsPath, 'out', 'views', 'dashboard.html'),
+                path.join(this._extensionUri.fsPath, 'views', 'dashboard.html'),
+                path.join(this._extensionUri.fsPath, 'src', 'views', 'dashboard.html'),
+                path.join(this._extensionUri.fsPath, 'dist', 'views', 'dashboard.html')
+            ];
+            let tpl = '';
+            const found = candidates.find(p => fs.existsSync(p));
+            if (found) {
+                tpl = fs.readFileSync(found, 'utf8');
+            } else {
+                throw new Error('dashboard.html not found. Tried: ' + candidates.join(';'));
+            }
+            const inner = this.renderTabContent(posts, config, currentTheme, themes);
+            tpl = tpl.replace('<!--TAB_CONTENT-->', inner);
+            // 通过 postMessage 告知 webview 当前 tab，以便设置选中状态（安全）
+            this._view.webview.html = tpl;
+            // 发送初始 tab selection + html（兼容更新）
+            setTimeout(() => {
+                this._view!.webview.postMessage({ type: 'setTab', tab: this.currentTab, html: inner });
+            }, 50);
+        } catch (err) {
+            console.error('加载 dashboard 模板失败', err);
+            this._view.webview.html = '<pre>加载界面失败，请查看扩展输出。</pre>';
+        }
     }
 
     private renderTabContent(posts: any[], config: any, currentTheme: string, themes: string[]) {

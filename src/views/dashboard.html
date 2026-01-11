@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline';">
+    <style>
+        body { padding: 0; color: var(--vscode-foreground); font-size: 12px; }
+        .nav-bar { display: flex; background: var(--vscode-sideBar-background); border-bottom: 1px solid var(--vscode-panel-border); position: sticky; top: 0; }
+        .nav-item { flex: 1; padding: 8px 4px; text-align: center; cursor: pointer; opacity: 0.6; font-size: 12px; }
+        .nav-item.active { opacity: 1; border-bottom: 2px solid var(--vscode-button-background); }
+        .content { padding: 10px; }
+        .card { background: var(--vscode-welcomePage-tileBackground); padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+        input { width: 100%; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 6px; margin: 6px 0; }
+        button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 8px 10px; cursor: pointer; margin: 4px 0; }
+        .btn-group { display:flex; gap:8px; }
+        .list .post-item { display:flex; justify-content:space-between; padding:6px 8px; border-bottom:1px solid rgba(0,0,0,0.05); }
+        .theme-item { display:flex; justify-content:space-between; padding:6px 8px; }
+        .log-container { max-height:200px; overflow:auto; background:rgba(0,0,0,0.03); padding:6px; border-radius:4px; }
+    </style>
+</head>
+<body>
+    <div class="nav-bar">
+        <div class="nav-item" id="nav-dashboard" onclick="tab('dashboard')">📊 Dashboard</div>
+        <div class="nav-item" id="nav-posts" onclick="tab('posts')">📝 Posts</div>
+        <div class="nav-item" id="nav-themes" onclick="tab('themes')">🎨 Themes</div>
+        <div class="nav-item" id="nav-config" onclick="tab('config')">⚙️ Config</div>
+        <div class="nav-item" id="nav-deploy" onclick="tab('deploy')">🚀 Deploy</div>
+        <div class="nav-item" id="nav-logs" onclick="tab('logs')">📜 Logs</div>
+    </div>
+
+    <div class="content" id="main-content">
+        <!--TAB_CONTENT-->
+    </div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        function tab(name) { vscode.postMessage({ type: 'switchTab', tab: name }); }
+        function send(type, arg) {
+            const payload = { type };
+            if (arg !== undefined) {
+                if (type === 'deletePost' || type === 'openPost') payload.path = arg;
+                else if (type === 'switchTheme') payload.theme = arg;
+                else if (type === 'switchTab') payload.tab = arg;
+                else payload.data = arg;
+            }
+            vscode.postMessage(payload);
+        }
+        function save() {
+            const data = {
+                title: document.getElementById('cfg-title')?.value,
+                author: document.getElementById('cfg-author')?.value,
+                url: document.getElementById('cfg-url')?.value
+            };
+            vscode.postMessage({ type: 'saveConfig', data });
+        }
+        window.addEventListener('message', event => {
+            const msg = event.data;
+            if (!msg) return;
+            if (msg.type === 'deployStatus') {
+                const el = document.getElementById('deploy-status');
+                if (el) el.textContent = msg.status;
+                const logs = document.getElementById('deploy-logs');
+                if (logs) logs.innerHTML += '<div>' + msg.status + '</div>';
+            }
+            if (msg.type === 'setTab') {
+                // 更新选中状态并替换主内容
+                document.getElementById('main-content').innerHTML = msg.html || '';
+                ['dashboard','posts','themes','config','deploy','logs'].forEach(t => {
+                    const el = document.getElementById('nav-' + t);
+                    if (!el) return;
+                    if (t === msg.tab) el.classList.add('active'); else el.classList.remove('active');
+                });
+            }
+        });
+    </script>
+</body>
+</html>
