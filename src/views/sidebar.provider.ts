@@ -4,11 +4,14 @@ import { PostService } from '../core/post.service';
 import { ThemeService } from '../core/theme.service';
 import { ConfigService } from '../core/config.service';
 import { Logger } from '../utils/logger';
+import { DeployService } from '../core/deploy.service';
+import { I18n, type Language } from '../utils/i18n';
 import * as fs from 'fs';
 
 export class HexoSidebarProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private currentTab = 'dashboard';
+    private currentLang: Language = 'zh-CN';
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -22,31 +25,34 @@ export class HexoSidebarProvider implements vscode.WebviewViewProvider {
         this._view = webviewView;
         webviewView.webview.options = { enableScripts: true };
 
+        // 从配置加载语言设置
+        const config = this.configService.getConfig();
+        this.currentLang = (config?.pluginLanguage || 'zh-CN') as Language;
+        I18n.setLanguage(this.currentLang);
+
         webviewView.webview.onDidReceiveMessage(async (msg) => {
             switch (msg.type) {
                 case 'switchTab':
                     this.currentTab = msg.tab || msg.data || msg.value || this.currentTab;
                     this.render();
                     break;
+                case 'setLanguage':
+                    const lang = msg.language as Language;
+                    if (lang && (lang === 'zh-CN' || lang === 'en-US')) {
+                        this.currentLang = lang;
+                        I18n.setLanguage(lang);
+                        await this.configService.updateConfig({ pluginLanguage: lang });
+                        this.render();
+                    }
+                    break;
                 case 'newPost':
-                    // 简单创建新文章：弹出输入框获取标题并新建文件（如果需要更复杂逻辑请在 PostService 中实现）
                     const title = await vscode.window.showInputBox({ prompt: 'New post title' });
                     if (title) {
-                        // 使用 workspace 根目录生成简单文件
-                        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                        if (root) {
-                            const fileName = title.replace(/[^a-z0-9\-]/gi, '-').toLowerCase() + '.md';
-                            const folder = require('path').join(root, 'source', '_posts');
-                            try {
-                                if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
-                                const filePath = require('path').join(folder, fileName);
-                                fs.writeFileSync(filePath, `---\ntitle: ${title}\ndate: ${new Date().toISOString()}\n---\n\n`);
-                                await this.postService.openPost(filePath);
-                            } catch (err) {
-                                vscode.window.showErrorMessage('创建文章失败');
-                            }
-                        } else {
-                            vscode.window.showErrorMessage('未找到 workspace 根目录');
+                        try {
+                            await this.hexoService.newPost(title);
+                            vscode.window.showInformationMessage(I18n.t('posts.createSuccess') + title);
+                        } catch (err) {
+                            vscode.window.showErrorMessage(I18n.t('posts.createFailed') + err);
                         }
                     }
                     this.render();
@@ -57,16 +63,24 @@ export class HexoSidebarProvider implements vscode.WebviewViewProvider {
                 case 'saveConfig':
                     try {
                         await this.configService.updateConfig(msg.data || msg.value || {});
-                        vscode.window.showInformationMessage('配置已保存');
+                        vscode.window.showInformationMessage(I18n.t('config.saveSuccess'));
                     } catch (err) {
-                        vscode.window.showErrorMessage('保存配置失败');
+                        vscode.window.showErrorMessage(I18n.t('config.saveFailed'));
                     }
                     this.render();
                     break;
                 case 'deletePost':
-                    const confirm = await vscode.window.showWarningMessage('确定删除这篇文章吗？', '确认', '取消');
-                    if (confirm === '确认') {
-                        fs.unlinkSync(msg.path); // 使用 fs.ts 封装
+                    const confirm = await vscode.window.showWarningMessage(I18n.t('posts.deleteConfirm'), I18n.t('posts.confirm'), I18n.t('posts.cancel'));
+                    if (confirm === I18n.t('posts.confirm')) {
+                        try {
+                            const p = msg.path;
+                            if (!p) throw new Error('path empty');
+                            const realPath = require('path').normalize(p);
+                            fs.unlinkSync(realPath);
+                            vscode.window.showInformationMessage(I18n.t('posts.deleteSuccess') + realPath);
+                        } catch (err) {
+                            vscode.window.showErrorMessage(I18n.t('posts.deleteFailed') + String(err));
+                        }
                         this.render();
                     }
                     break;
@@ -87,23 +101,24 @@ export class HexoSidebarProvider implements vscode.WebviewViewProvider {
 
     private async executeDeployment(): Promise<void> {
         if (!this._view) return;
-
+        const deployService = new DeployService(this.hexoService);
         // 更新UI显示部署状态
-        this._view.webview.postMessage({ type: 'deployStatus', status: 'In Progress' });
-
+        this._view.webview.postMessage({ type: 'deployStatus', status: 'Starting' });
         try {
-            // TODO: 实际的部署逻辑应该在这里实现
-            // 比如调用DeployService.deploy()
-            console.log('执行部署操作...');
-
-            // 模拟部署过程
-            setTimeout(() => {
-                this._view!.webview.postMessage({ type: 'deployStatus', status: 'Completed' });
-                this.render(); // 重新渲染视图更新状态
-            }, 1000);
+            await deployService.runDeploy((msg: string) => {
+                const entry = Logger.log(msg);
+                if (this._view) {
+                    this._view.webview.postMessage({ type: 'deployStatus', status: msg });
+                    this._view.webview.postMessage({ type: 'logs', logs: Logger.getLogs() });
+                }
+            });
+            // 完成后刷新
+            this._view.webview.postMessage({ type: 'deployStatus', status: 'Completed' });
+            this.render();
         } catch (error) {
-            this._view.webview.postMessage({ type: 'deployStatus', status: 'Error' });
-            console.error('部署失败:', error);
+            const em = String(error || 'Unknown error');
+            Logger.log('[DEPLOY ERROR] ' + em);
+            if (this._view) this._view.webview.postMessage({ type: 'deployStatus', status: 'Error: ' + em });
         }
     }
 
@@ -134,28 +149,44 @@ export class HexoSidebarProvider implements vscode.WebviewViewProvider {
             tpl = tpl.replace('<!--TAB_CONTENT-->', inner);
             // 通过 postMessage 告知 webview 当前 tab，以便设置选中状态（安全）
             this._view.webview.html = tpl;
-            // 发送初始 tab selection + html（兼容更新）
+            // 发送初始 tab selection + language
             setTimeout(() => {
-                this._view!.webview.postMessage({ type: 'setTab', tab: this.currentTab, html: inner });
+                this._view!.webview.postMessage({
+                    type: 'setTab',
+                    tab: this.currentTab,
+                    html: inner,
+                    language: this.currentLang
+                });
             }, 50);
         } catch (err) {
             console.error('加载 dashboard 模板失败', err);
-            this._view.webview.html = '<pre>加载界面失败，请查看扩展输出。</pre>';
+            this._view.webview.html = '<pre>' + I18n.t('msg.loadFailed') + '</pre>';
+        }
+    }
+
+    private getLastDeployTime(): string {
+        try {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) return 'Unknown';
+            const pubPath = require('path').join(root, 'public');
+            if (!require('fs').existsSync(pubPath)) return 'Never';
+            const stat = require('fs').statSync(pubPath);
+            return stat.mtime.toLocaleString();
+        } catch (e) {
+            return 'Error';
         }
     }
 
     private renderTabContent(posts: any[], config: any, currentTheme: string, themes: string[]) {
+        const t = (key: string) => I18n.t(key);
         switch (this.currentTab) {
             case 'dashboard':
+                const lastDeploy = this.getLastDeployTime();
                 return `
                 <div class="card">
-                    <p>📝 文章数量: <strong>${posts.length}</strong></p>
-                    <p>🎨 当前主题: <strong>${currentTheme}</strong></p>
-                    <p>🚀 上次部署: 2025-01-02 21:30</p>
-                </div>
-                <div class="btn-group">
-                    <button onclick="send('newPost')">➕ New Post</button>
-                    <button onclick="tab('deploy')">🚀 Deploy</button>
+                    <p>📝 ${t('dashboard.posts')}: <strong>${posts.length}</strong></p>
+                    <p>🎨 ${t('dashboard.theme')}: <strong>${currentTheme}</strong></p>
+                    <p>🚀 ${t('dashboard.lastDeploy')}: <strong>${lastDeploy}</strong></p>
                 </div>
             `;
 
@@ -170,7 +201,7 @@ export class HexoSidebarProvider implements vscode.WebviewViewProvider {
                 </div>
             `).join('');
                 return `
-                <button class="btn-primary" onclick="send('newPost')">➕ New Post</button>
+                <button class="btn-primary" onclick="send('newPost')">${t('posts.newPost')}</button>
                 <div class="list">${postItems}</div>
             `;
 
@@ -178,40 +209,50 @@ export class HexoSidebarProvider implements vscode.WebviewViewProvider {
                 const themeList = themes.map(t => `
                 <div class="theme-item ${t === currentTheme ? 'active' : ''}">
                     <span>${t}</span>
-                    ${t === currentTheme ? '<span>(Current)</span>' : `<button onclick="send('switchTheme', '${t}')">Apply</button>`}
+                    ${t === currentTheme ? '<span>' + I18n.t('themes.current') + '</span>' : `<button onclick="send('switchTheme', '${t}')">${I18n.t('themes.apply')}</button>`}
                 </div>
             `).join('');
-                return `<h3>🎨 Themes</h3><div class="list">${themeList}</div>`;
+                return `<h3>${t('themes.title')}</h3><div class="list">${themeList}</div>`;
 
             case 'config':
                 return `
-                <h3>⚙️ Config</h3>
-                <label>Site Title</label>
+                <h3>${t('config.title')}</h3>
+                <label>${t('config.siteTitle')}</label>
                 <input id="cfg-title" value="${config?.title || ''}">
-                <label>Author</label>
+                <label>${t('config.author')}</label>
                 <input id="cfg-author" value="${config?.author || ''}">
-                <label>URL</label>
+                <label>${t('config.url')}</label>
                 <input id="cfg-url" value="${config?.url || ''}">
-                <button class="btn-primary" onclick="save()">Save Config</button>
+                <button class="btn-primary" onclick="save()">${t('config.save')}</button>
             `;
 
             case 'deploy':
                 return `
-                <h3>🚀 Deploy</h3>
+                <h3>${t('deploy.title')}</h3>
                 <div class="card">
-                    <p>Target: <strong>GitHub Pages</strong></p>
-                    <p>Status: <span id="deploy-status">Ready</span></p>
+                    <p>${t('deploy.target')}: <strong>GitHub Pages</strong></p>
+                    <p>${t('deploy.status')}: <span id="deploy-status">${t('deploy.ready')}</span></p>
                 </div>
-                <button class="btn-primary" onclick="send('runDeploy')">Deploy Now</button>
+                <button class="btn-primary" onclick="send('runDeploy')">${t('deploy.button')}</button>
                 <div id="deploy-logs" class="log-container"></div>
             `;
 
             case 'logs':
                 const logs = Logger.getLogs().map(l => `<div class="log-line">${l}</div>`).join('');
-                return `<h3>📜 Logs</h3><div class="log-container">${logs}</div>`;
+                return `<h3>${t('logs.title')}</h3><div class="log-container">${logs}</div>`;
+
+            case 'settings':
+                return `
+                <h3>⚙️ Settings</h3>
+                <label>${t('config.language')}</label>
+                <div style="display:flex;gap:8px;margin:8px 0;">
+                    <button onclick="send('setLanguage', 'zh-CN')" style="${this.currentLang === 'zh-CN' ? 'background: var(--vscode-button-background);' : ''}">中文</button>
+                    <button onclick="send('setLanguage', 'en-US')" style="${this.currentLang === 'en-US' ? 'background: var(--vscode-button-background);' : ''}">English</button>
+                </div>
+            `;
 
             default:
-                return `未知状态`;
+                return `Unknown tab`;
         }
     }
 }
